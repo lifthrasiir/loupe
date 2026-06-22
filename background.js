@@ -1,49 +1,77 @@
 'use strict';
 
-chrome.commands.onCommand.addListener((command, tab) => {
-  if (command === 'run-ocr') {
-    chrome.tabs.sendMessage(tab.id, { type: 'run-ocr' });
+if (typeof importScripts === 'function' && typeof LoupeApi === 'undefined') {
+  importScripts('extension-api.js');
+}
+
+LoupeApi.commands.onCommand.addListener((command, tab) => {
+  if (command === 'run-ocr' && tab && tab.id !== undefined) {
+    LoupeApi.tabs.sendMessage(tab.id, { type: 'run-ocr' }).catch((error) => {
+      console.warn('[Loupe] Failed to send command to tab:', error.message);
+    });
   }
 });
 
+let creatingOffscreen = null;
+
 async function ensureOffscreen() {
-  if (await chrome.offscreen.hasDocument()) return;
-  await chrome.offscreen.createDocument({
-    url: 'offscreen.html',
-    reasons: ['DOM_SCRAPING'],
-    justification: 'Required for working around same-origin policy when fetching images and performing OCR.'
-  });
+  if (!LoupeApi.offscreen) return false;
+
+  if (typeof LoupeApi.offscreen.hasDocument === 'function' &&
+      await LoupeApi.offscreen.hasDocument()) {
+    return true;
+  }
+
+  if (!creatingOffscreen) {
+    creatingOffscreen = LoupeApi.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: ['DOM_SCRAPING'],
+      justification: 'Required for DOM-backed local OCR processing.'
+    }).finally(() => {
+      creatingOffscreen = null;
+    });
+  }
+  await creatingOffscreen;
+  return true;
 }
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.target === 'offscreen') return false;
+LoupeApi.runtime.onMessage.addListener((msg, sender) => {
+  if (msg.target === 'offscreen' || msg.target === 'ocr-host') return undefined;
 
   if (msg.type === 'fetch-image') {
-    fetchImage(msg.url, msg.pageUrl).then(sendResponse);
-    return true;
+    return fetchImage(msg.url, msg.pageUrl);
   }
 
   if (msg.type === 'capture-visible') {
-    captureVisible(sender.tab.id, msg.rect, msg.dpr).then(sendResponse);
-    return true;
+    return captureVisible(sender.tab.id, msg.rect, msg.dpr);
   }
 
   if (msg.type === 'ocr-process') {
-    (async () => {
-      try {
-        await ensureOffscreen();
-        const result = await chrome.runtime.sendMessage({
-          ...msg,
-          target: 'offscreen'
-        });
-        sendResponse(result);
-      } catch (e) {
-        sendResponse({ error: e.message });
-      }
-    })();
-    return true;
+    return processOCR(msg);
   }
+
+  return undefined;
 });
+
+async function processOCR(msg) {
+  try {
+    if (await ensureOffscreen()) {
+      return LoupeApi.runtime.sendMessage({
+        ...msg,
+        target: 'offscreen'
+      });
+    }
+
+    if (!globalThis.LoupeOcrHost) {
+      throw new Error('OCR host is not available in this browser context');
+    }
+
+    const result = await globalThis.LoupeOcrHost.processImageDataUrl(msg.imageDataUrl);
+    return { result };
+  } catch (error) {
+    return { error: error.message || String(error) };
+  }
+}
 
 async function fetchImage(url, pageUrl) {
   try {
@@ -62,7 +90,7 @@ async function fetchImage(url, pageUrl) {
 
 async function captureVisible(tabId, rect, dpr) {
   try {
-    const dataUrl = await chrome.tabs.captureVisibleTab(null, {
+    const dataUrl = await LoupeApi.tabs.captureVisibleTab(null, {
       format: 'png'
     });
     return { dataUrl, rect, dpr };

@@ -6,24 +6,47 @@ let anchorCounter = 0;
 let currentOverlay = null;
 let currentAnchorTarget = null;
 
+function supportsAnchorPositioning() {
+  return typeof CSS !== 'undefined' &&
+    typeof CSS.supports === 'function' &&
+    CSS.supports('top: anchor(top)') &&
+    CSS.supports('width: anchor-size(width)');
+}
+
+function applyGeometryPosition(host, targetEl) {
+  const rect = targetEl.getBoundingClientRect();
+  host.style.top = `${rect.top}px`;
+  host.style.left = `${rect.left}px`;
+  host.style.width = `${rect.width}px`;
+  host.style.height = `${rect.height}px`;
+}
+
 function createOverlayElement(targetEl, regions, clusters, naturalWidth, naturalHeight) {
-  const anchorId = `--loupe-${anchorCounter++}`;
-  targetEl.style.anchorName = anchorId;
+  const useAnchorPositioning = supportsAnchorPositioning();
+  const anchorId = useAnchorPositioning ? `--loupe-${anchorCounter++}` : '';
+  if (useAnchorPositioning) targetEl.style.anchorName = anchorId;
 
   const host = document.createElement('div');
   host.setAttribute('data-loupe-overlay', '');
   host.style.cssText = `
     position: fixed;
-    position-anchor: ${anchorId};
-    top: anchor(top);
-    left: anchor(left);
-    width: anchor-size(width);
-    height: anchor-size(height);
     pointer-events: none;
     z-index: 2147483647;
     margin: 0; padding: 0; border: 0;
     display: block;
   `;
+
+  if (useAnchorPositioning) {
+    host.style.positionAnchor = anchorId;
+    host.style.top = 'anchor(top)';
+    host.style.left = 'anchor(left)';
+    host.style.width = 'anchor-size(width)';
+    host.style.height = 'anchor-size(height)';
+  } else {
+    applyGeometryPosition(host, targetEl);
+  }
+
+  host._loupePositioning = { useAnchorPositioning, targetEl, anchorId };
 
   const shadow = host.attachShadow({ mode: 'open' });
 
@@ -195,7 +218,7 @@ function createOverlayElement(targetEl, regions, clusters, naturalWidth, natural
   document.addEventListener('selectionchange', onSelectionChange);
   host._selectionChangeHandler = onSelectionChange;
 
-  return { host, anchorId };
+  return { host, anchorId, useAnchorPositioning };
 }
 
 function fitText(shadowRoot) {
@@ -389,7 +412,7 @@ function createOverlay(targetEl, regions, naturalWidth, naturalHeight, pixelData
   annotateRegions(regions, pixelData);
   const clusters = clusterRegions(regions);
 
-  const { host, anchorId } = createOverlayElement(
+  const { host, anchorId, useAnchorPositioning } = createOverlayElement(
     targetEl, regions, clusters, naturalWidth, naturalHeight
   );
   document.documentElement.appendChild(host);
@@ -398,12 +421,23 @@ function createOverlay(targetEl, regions, naturalWidth, naturalHeight, pixelData
   currentAnchorTarget = targetEl;
 
   const container = host.shadowRoot.querySelector('.container');
+  const updatePosition = () => {
+    if (!useAnchorPositioning) applyGeometryPosition(host, targetEl);
+    fitText(host.shadowRoot);
+  };
+
+  if (!useAnchorPositioning) {
+    window.addEventListener('scroll', updatePosition, true);
+    window.addEventListener('resize', updatePosition);
+    host._positionUpdateHandler = updatePosition;
+  }
+
   const ro = new ResizeObserver(() => {
-    if (fitText(host.shadowRoot)) {
-      ro.disconnect();
-    }
+    updatePosition();
   });
   ro.observe(container);
+  ro.observe(targetEl);
+  host._resizeObserver = ro;
 
   const mo = new MutationObserver(() => fitText(host.shadowRoot));
   mo.observe(host, {
@@ -421,6 +455,13 @@ function removeOverlay() {
     if (currentOverlay._mutationObserver) {
       currentOverlay._mutationObserver.disconnect();
     }
+    if (currentOverlay._resizeObserver) {
+      currentOverlay._resizeObserver.disconnect();
+    }
+    if (currentOverlay._positionUpdateHandler) {
+      window.removeEventListener('scroll', currentOverlay._positionUpdateHandler, true);
+      window.removeEventListener('resize', currentOverlay._positionUpdateHandler);
+    }
     if (currentOverlay._selectionChangeHandler) {
       document.removeEventListener('selectionchange', currentOverlay._selectionChangeHandler);
     }
@@ -433,6 +474,10 @@ function removeOverlay() {
   }
 }
 
-window.LoupeOverlay = { createOverlay, removeOverlay };
+window.LoupeOverlay = {
+  createOverlay,
+  removeOverlay,
+  _test: { supportsAnchorPositioning, applyGeometryPosition }
+};
 
 })();

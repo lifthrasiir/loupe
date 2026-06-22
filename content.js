@@ -13,7 +13,7 @@
     }
   }, { passive: true });
 
-  chrome.runtime.onMessage.addListener((msg) => {
+  LoupeApi.runtime.onMessage.addListener((msg) => {
     if (msg.type === 'run-ocr') handleOCR();
   });
 
@@ -42,7 +42,11 @@
       const result = await runOCROffscreen(imageData.pixels);
 
       if (result.regions.length === 0) {
-        showStatus('No text found');
+        const debug = result._debug
+          ? ` (${result._debug.inputWidth}x${result._debug.inputHeight})`
+          : '';
+        showStatus('No text found' + debug);
+        console.warn('[Loupe] OCR returned no regions', result._debug || result.debug || result.timing || result);
         return;
       }
 
@@ -78,11 +82,14 @@
     canvas.getContext('2d').putImageData(pixels, 0, 0);
     const dataUrl = canvas.toDataURL('image/png');
 
-    const response = await chrome.runtime.sendMessage({
+    const response = await LoupeApi.runtime.sendMessage({
       type: 'ocr-process',
       imageDataUrl: dataUrl
     });
 
+    if (!response) {
+      throw new Error('OCR request did not receive a background response');
+    }
     if (response.error) throw new Error(response.error);
     return response.result;
   }
@@ -201,7 +208,7 @@
       const visBottom = Math.min(vpH, rect.bottom);
       if (visRight <= visLeft || visBottom <= visTop) return null;
 
-      const response = await chrome.runtime.sendMessage({
+      const response = await LoupeApi.runtime.sendMessage({
         type: 'capture-visible',
         rect: {
           x: Math.round(visLeft * dpr),

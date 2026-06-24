@@ -16,16 +16,24 @@ All inference runs **locally in your browser** using WebGL2. It is also friendly
 
 ## Usage
 
-1. Load the extension.
-2. Hover over an image or canvas on any page.
-3. Press **Ctrl+Shift+E** (or **Cmd+Shift+E** on macOS).
-4. Recognized text appears as a selectable overlay. Select and copy as you would with normal text.
-5. Press the shortcut again on another element to dismiss the current overlay and start a new one.
+1. Build the browser-specific extension directories with `npm run build`.
+2. Load `dist/chrome/` in Chrome or `dist/firefox/manifest.json` from Firefox `about:debugging`.
+3. Hover over an image or canvas on any page.
+4. Press **Ctrl+Shift+E** (or **Cmd+Shift+E** on macOS).
+5. Recognized text appears as a selectable overlay. Select and copy as you would with normal text.
+6. Press the shortcut again on another element to dismiss the current overlay and start a new one.
 
 ## Requirements
 
-- Any modern browser with Manifest V3 support, which includes Google Chrome (or any Chromium-based browser) and Firefox.
+- Google Chrome or a Chromium-based browser with Manifest V3 support.
+- Firefox with Manifest V3 extension support. Use the generated `dist/firefox/` package rather than the Chrome package.
 - WebGL2 with the `EXT_color_buffer_float` extension.
+
+## Development
+
+- `npm run build` creates `dist/chrome/` and `dist/firefox/`.
+- `npm test` runs manifest, adapter, OCR host, overlay positioning, and package-content tests.
+- See [docs/firefox-testing.md](docs/firefox-testing.md) for the Firefox manual smoke checklist.
 
 ## License
 

@@ -1,0 +1,18 @@
+{
+  "background": {
+    "scripts": [
+      "extension-api.js",
+      "ocr-engine.js",
+      "ocr-document.js",
+      "background.js"
+    ]
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "loupe@teslamint.local",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
+    }
+  }
+}

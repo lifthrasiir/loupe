@@ -2,12 +2,20 @@
   'use strict';
 
   // ============ CONSTANTS ============
-  const DET_MAX_SIDE = 960, DET_THRESH = 0.2, DET_BOX_THRESH = 0.45, DET_UNCLIP_RATIO = 1.4;
+  const DEFAULT_DET_MAX_SIDE = 960, DET_THRESH = 0.2, DET_BOX_THRESH = 0.45, DET_UNCLIP_RATIO = 1.4;
   const REC_HEIGHT = 48, REC_TARGET_WIDTH = 320;
   const DET_MEAN = [.485, .456, .406], DET_STD = [.229, .224, .225];
 
   // ============ CLOSURE STATE (initialized in init()) ============
   let gl, fbo, quadVAO;
+  let lastReadbackType = 'none';
+  let lastReadbackError = 0;
+  let floatTexInternalFormat = null;
+  let floatTexUploadType = null;
+  let floatTexDebugName = 'uninitialized';
+  let detMaxSide = DEFAULT_DET_MAX_SIDE;
+  let maxRenderbufferSize = 0;
+  let maxTextureSize = 0;
   const P = {};
   const texPool = new Map();
   const ulCache = new Map();
@@ -43,22 +51,90 @@
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    if (data instanceof Uint16Array)
+    if (data instanceof Uint16Array) {
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, data);
-    else if (data)
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, f32ToF16(data));
-    else
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
+    } else if (data) {
+      const upload = floatTexUploadType === gl.FLOAT ? data : f32ToF16(data);
+      gl.texImage2D(gl.TEXTURE_2D, 0, floatTexInternalFormat, w, h, 0, gl.RGBA, floatTexUploadType, upload);
+    } else {
+      gl.texImage2D(gl.TEXTURE_2D, 0, floatTexInternalFormat, w, h, 0, gl.RGBA, floatTexUploadType, null);
+    }
     gl.bindTexture(gl.TEXTURE_2D, null);
     return t;
   }
   function readTex(tex, w, h) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-    const u16 = new Uint16Array(w * h * 4);
-    gl.readPixels(0, 0, w, h, gl.RGBA, gl.HALF_FLOAT, u16);
+    if (typeof gl.readBuffer === 'function') gl.readBuffer(gl.COLOR_ATTACHMENT0);
+    gl.finish();
+
+    const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    const readFormat = gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_FORMAT);
+    const readType = gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_TYPE);
+
+    function finishRead(typeName, errorCode, data) {
+      lastReadbackType = typeName;
+      lastReadbackError = errorCode;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      return data;
+    }
+
+    function tryReadFloat(format, type, typeName) {
+      const out = new Float32Array(w * h * 4);
+      gl.readPixels(0, 0, w, h, format, type, out);
+      const err = gl.getError();
+      if (err === gl.NO_ERROR) return finishRead(typeName, 0, out);
+      return { err };
+    }
+
+    function tryReadHalf(format, type, typeName) {
+      const out = new Uint16Array(w * h * 4);
+      gl.readPixels(0, 0, w, h, format, type, out);
+      const err = gl.getError();
+      if (err === gl.NO_ERROR) return finishRead(typeName, 0, f16ToF32(out));
+      return { err };
+    }
+
+    function tryReadByte(format, type, typeName) {
+      const out = new Uint8Array(w * h * 4);
+      gl.readPixels(0, 0, w, h, format, type, out);
+      const err = gl.getError();
+      if (err === gl.NO_ERROR) {
+        const f = new Float32Array(out.length);
+        for (let i = 0; i < out.length; i++) f[i] = out[i] / 255;
+        return finishRead(typeName, 0, f);
+      }
+      return { err };
+    }
+
+    const attempts = [];
+    function attempt(format, type, typeName) {
+      let result;
+      if (type === gl.FLOAT) result = tryReadFloat(format, type, typeName);
+      else if (type === gl.HALF_FLOAT) result = tryReadHalf(format, type, typeName);
+      else if (type === gl.UNSIGNED_BYTE) result = tryReadByte(format, type, typeName);
+      else result = { err: gl.INVALID_ENUM };
+      if (!(result && typeof result === 'object' && 'err' in result)) return result;
+      attempts.push(`${typeName}:${result.err}`);
+      return null;
+    }
+
+    const implResult = attempt(readFormat, readType, `impl:${readFormat}/${readType}`);
+    if (implResult) return implResult;
+
+    const floatResult = attempt(gl.RGBA, gl.FLOAT, 'float32');
+    if (floatResult) return floatResult;
+
+    const halfResult = attempt(gl.RGBA, gl.HALF_FLOAT, 'float16');
+    if (halfResult) return halfResult;
+
+    const byteResult = attempt(gl.RGBA, gl.UNSIGNED_BYTE, 'uint8');
+    if (byteResult) return byteResult;
+
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    return f16ToF32(u16);
+    lastReadbackType = `failed:${attempts.join(',')}`;
+    lastReadbackError = status;
+    throw new Error(`WebGL readPixels failed (${attempts.join(',')}) framebuffer=${status}`);
   }
   function freeTex(t) { if (t) { gl.deleteTexture(t); } }
 
@@ -1730,7 +1806,7 @@ void main(){
 
   // ============ IMAGE PROCESSING ============
   function detPreprocess(imgData, imgW, imgH) {
-    const ratio = DET_MAX_SIDE / Math.max(imgH, imgW);
+    const ratio = detMaxSide / Math.max(imgH, imgW);
     const nH = Math.ceil(imgH * ratio / 32) * 32;
     const nW = Math.ceil(imgW * ratio / 32) * 32;
     const c = document.createElement('canvas'); c.width = nW; c.height = nH;
@@ -2047,6 +2123,12 @@ void main(){
     const detResult = await exec.runModel('det', inputST);
     const probData = detResult.data;
     const probH = detResult.shape[1], probW = detResult.shape[2];
+    let probMin = Infinity, probMax = -Infinity;
+    for (let i = 0; i < probH * probW; i++) {
+      const v = probData[i];
+      if (v < probMin) probMin = v;
+      if (v > probMax) probMax = v;
+    }
     const tDet = performance.now() - t0;
 
     const { boxes, scores } = detPostprocess(probData, probH, probW, pre.origH, pre.origW);
@@ -2083,7 +2165,25 @@ void main(){
     const tRec = performance.now() - t1;
 
     regions.sort((a, b) => a.bbox.y_min - b.bbox.y_min || a.bbox.x_min - b.bbox.x_min);
-    return { regions, timing: { detection_ms: Math.round(tDet), recognition_ms: Math.round(tRec), total_ms: Math.round(tDet + tRec) } };
+    return {
+      regions,
+      timing: { detection_ms: Math.round(tDet), recognition_ms: Math.round(tRec), total_ms: Math.round(tDet + tRec) },
+      debug: {
+        detectionBoxes: boxes.length,
+        detectionScores: scores.length,
+        probMin: Math.round(probMin * 10000) / 10000,
+        probMax: Math.round(probMax * 10000) / 10000,
+        probWidth: probW,
+        probHeight: probH,
+        detMaxSide,
+        maxRenderbufferSize,
+        maxTextureSize,
+        floatTextureFormat: floatTexDebugName,
+        readbackType: lastReadbackType,
+        readbackError: lastReadbackError,
+        framebufferStatus: gl.checkFramebufferStatus(gl.FRAMEBUFFER)
+      }
+    };
   }
 
   // ============ INIT ============
@@ -2098,6 +2198,18 @@ void main(){
     const extFloat = gl.getExtension('EXT_color_buffer_float');
     if (!extFloat) throw new Error('EXT_color_buffer_float not supported');
     gl.getExtension('OES_texture_float_linear');
+    const preferFloat32Targets = typeof navigator !== 'undefined' && /Firefox\//.test(navigator.userAgent || '');
+    maxRenderbufferSize = gl.getParameter(gl.MAX_RENDERBUFFER_SIZE) || 0;
+    maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 0;
+    if (preferFloat32Targets && maxRenderbufferSize) {
+      const safeSide = Math.floor(maxRenderbufferSize / 16 / 32) * 32;
+      detMaxSide = Math.max(320, Math.min(DEFAULT_DET_MAX_SIDE, safeSide));
+    } else {
+      detMaxSide = DEFAULT_DET_MAX_SIDE;
+    }
+    floatTexInternalFormat = preferFloat32Targets ? gl.RGBA32F : gl.RGBA16F;
+    floatTexUploadType = preferFloat32Targets ? gl.FLOAT : gl.HALF_FLOAT;
+    floatTexDebugName = preferFloat32Targets ? 'rgba32f' : 'rgba16f';
 
     fbo = gl.createFramebuffer();
 

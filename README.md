@@ -30,6 +30,7 @@ All inference runs **locally in your browser** using WebGL2. It is also friendly
 ## Development
 
 - Run the unit tests with `node --test`.
+- The bundled weights are the original PP-OCRv6 weights with dead channels pruned. Many channels of the original weights are constant (all weights producing them are zero), so `tools/prune_model.py` removes them and folds their constant contribution into the following biases. The pruning is exact up to f16 rounding. The original files can be found in the initial commit; to regenerate, run `python tools/prune_model.py <original dir> <output dir>` (requires numpy).
 
 ## License
 

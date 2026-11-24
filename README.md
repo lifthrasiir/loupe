@@ -27,6 +27,10 @@ All inference runs **locally in your browser** using WebGL2. It is also friendly
 - Any modern browser with Manifest V3 support, which includes Google Chrome (or any Chromium-based browser) and Firefox.
 - WebGL2 with the `EXT_color_buffer_float` extension.
 
+## Development
+
+- Run the unit tests with `node --test`.
+
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE.txt).

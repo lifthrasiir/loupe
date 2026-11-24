@@ -15,21 +15,53 @@
 
   // ============ FLOAT16 CONVERSION ============
   const _cvtBuf = new ArrayBuffer(4), _cvtF32 = new Float32Array(_cvtBuf), _cvtU32 = new Uint32Array(_cvtBuf);
+  // Round-to-nearest-even with subnormals: the weights contain many f16 subnormals that
+  // measurably affect the output, so they must survive both directions.
+  // The native Float16Array is several times faster; the soft versions are the fallback.
+  const HAS_F16_ARRAY = typeof Float16Array === 'function';
   function f32ToF16(f32) {
+    return HAS_F16_ARRAY ? new Uint16Array(new Float16Array(f32).buffer) : f32ToF16Soft(f32);
+  }
+  function f16ToF32(u16) {
+    return HAS_F16_ARRAY ? new Float32Array(new Float16Array(u16.buffer, u16.byteOffset, u16.length)) : f16ToF32Soft(u16);
+  }
+  function f32ToF16Soft(f32) {
     const u16 = new Uint16Array(f32.length);
     for (let i = 0; i < f32.length; i++) {
       _cvtF32[0] = f32[i]; const b = _cvtU32[0];
-      const s = (b >> 16) & 0x8000, e = ((b >> 23) & 0xff) - 112, m = (b >> 13) & 0x3ff;
-      u16[i] = e <= 0 ? s : e >= 31 ? s | 0x7c00 : s | (e << 10) | m;
+      const s = (b >>> 16) & 0x8000, e = (b >>> 23) & 0xff, m = b & 0x7fffff;
+      let h;
+      if (e === 0xff) {
+        h = 0x7c00 | (m ? 0x200 : 0);                  // Inf / NaN
+      } else if (e > 142) {
+        h = 0x7c00;                                     // overflow to Inf
+      } else if (e >= 113) {                            // normal f16 range
+        h = ((e - 112) << 10) | (m >>> 13);
+        const r = m & 0x1fff;
+        if (r > 0x1000 || (r === 0x1000 && (h & 1))) h++; // a carry correctly bumps the exponent
+      } else if (e >= 102) {                            // f16 subnormal range
+        const shift = 126 - e, mm = m | 0x800000;
+        h = mm >>> shift;
+        const r = mm & ((1 << shift) - 1), half = 1 << (shift - 1);
+        if (r > half || (r === half && (h & 1))) h++;
+      } else {
+        h = 0;                                          // below half the smallest subnormal
+      }
+      u16[i] = s | h;
     }
     return u16;
   }
-  function f16ToF32(u16) {
+  function f16ToF32Soft(u16) {
     const f32 = new Float32Array(u16.length);
     for (let i = 0; i < u16.length; i++) {
-      const h = u16[i], s = (h & 0x8000) << 16, e = (h >> 10) & 0x1f, m = h & 0x3ff;
-      _cvtU32[0] = e === 0 ? s : e === 31 ? s | 0x7f800000 | (m << 13) : s | ((e + 112) << 23) | (m << 13);
-      f32[i] = _cvtF32[0];
+      const h = u16[i], e = (h >> 10) & 0x1f, m = h & 0x3ff;
+      if (e === 0) {
+        f32[i] = (h & 0x8000 ? -m : m) * 5.960464477539063e-8; // m * 2^-24
+      } else {
+        const s = (h & 0x8000) << 16;
+        _cvtU32[0] = e === 31 ? s | 0x7f800000 | (m << 13) : s | ((e + 112) << 23) | (m << 13);
+        f32[i] = _cvtF32[0];
+      }
     }
     return f32;
   }
@@ -2159,7 +2191,9 @@ void main(){
     isReady() { return !!exec; },
     cropRegion(pixelData, width, height, box) {
       return cropLine(pixelData, width, height, box);
-    }
+    },
+    // exposed for unit tests only
+    _internal: { f16ToF32, f32ToF16, f16ToF32Soft, f32ToF16Soft },
   };
 
 })();
